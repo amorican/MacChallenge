@@ -11,18 +11,34 @@
 
 @interface RecorderViewController ()
 
+
+// AVFoundation Capture Input
+
 @property (strong, nonatomic) AVCaptureDeviceInput *videoDeviceInput;
 @property (strong, nonatomic) AVCaptureDeviceInput *audioDeviceInput;
+
+
+// AVFoundation Capture Output
+
 @property (strong, nonatomic) AVCaptureMovieFileOutput *movieFileOutput;
 @property (strong, nonatomic) AVCaptureAudioPreviewOutput *audioPreviewOutput;
 
-@property (strong, nonatomic) NSTimer *audioLevelsTimer;
 
+// AVFoundation Session
+
+@property (strong, nonatomic) AVCaptureSession *captureSession;
+
+
+// Misc
+
+@property (strong, nonatomic) NSTimer *audioLevelsTimer;
 @property (strong, nonatomic) NSArray *observers;
 
 - (void)setupNotifications;
 
 @end
+
+
 
 @implementation RecorderViewController
 
@@ -76,7 +92,20 @@
     }
 
     [self refreshDevices];
-	[self.captureSession startRunning];
+    
+    
+    // Start the session
+    // As per Apple (https://developer.apple.com/library/mac/documentation/AVFoundation/Reference/AVCaptureSession_Class/Reference/Reference.html#//apple_ref/occ/instm/AVCaptureSession/beginConfiguration):
+    //
+    // The startRunning method is a blocking call which can take some time, therefore
+    // you should perform session setup on a serial queue so that the main queue isn't blocked
+    //
+    
+    dispatch_queue_t toggleCaptureQueue = dispatch_queue_create("self.franklegrand.togglecapture.queue", DISPATCH_QUEUE_SERIAL);
+    dispatch_async(toggleCaptureQueue, ^{
+        [self.captureSession startRunning];
+    });
+
 	
 	// Start updating the audio level meter
 	self.audioLevelsTimer = [NSTimer scheduledTimerWithTimeInterval:0.1f
@@ -150,7 +179,11 @@
     [self.audioLevelsTimer invalidate];
 	
 	// Stop the session
-    [self.captureSession stopRunning];
+    dispatch_queue_t toggleCaptureQueue = dispatch_queue_create("self.franklegrand.togglecapture.queue", DISPATCH_QUEUE_SERIAL);
+    dispatch_async(toggleCaptureQueue, ^{
+        [self.captureSession stopRunning];
+    });
+
 	
 	// Set movie file output delegate to nil to avoid a dangling pointer
     [[self movieFileOutput] setDelegate:nil];
@@ -166,11 +199,18 @@
 
 - (void)refreshDevices
 {
+    // Reload our connected video and audio devices:
+    //
+    
 	[self setVideoDevices:[[AVCaptureDevice devicesWithMediaType:AVMediaTypeVideo]
                            arrayByAddingObjectsFromArray:[AVCaptureDevice devicesWithMediaType:AVMediaTypeMuxed]]];
     
 	[self setAudioDevices:[AVCaptureDevice devicesWithMediaType:AVMediaTypeAudio]];
 	
+    
+    // If a device that was selected is no longer there, un-select it
+    //
+    
 	[self.captureSession beginConfiguration];
 	
 	if (![[self videoDevices] containsObject:[self selectedVideoDevice]])
@@ -328,6 +368,8 @@
 
 #pragma mark - Recording Delegate methods
 
+#pragma mark AVCaptureFileOutputRecordingDelegate Implementation
+
 - (void)captureOutput:(AVCaptureFileOutput *)captureOutput didStartRecordingToOutputFileAtURL:(NSURL *)fileURL fromConnections:(NSArray *)connections
 {
 //	NSLog(@"Did start recording to %@", [fileURL description]);
@@ -350,11 +392,6 @@
 	});
 }
 
-- (void)captureOutput:(AVCaptureOutput *)captureOutput didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection
-{
-    
-}
-
 - (void)captureOutput:(AVCaptureFileOutput *)captureOutput didFinishRecordingToOutputFileAtURL:(NSURL *)outputFileURL fromConnections:(NSArray *)connections error:(NSError *)recordError
 {
 	if (recordError != nil && [[[recordError userInfo] objectForKey:AVErrorRecordingSuccessfullyFinishedKey] boolValue] == NO)
@@ -372,116 +409,147 @@
 		[savePanel setCanSelectHiddenExtension:YES];
         
 		[savePanel beginSheetModalForWindow:self.view.window completionHandler:^(NSInteger result)
-        {
-			if (result == NSOKButton)
-            {
-				[[NSFileManager defaultManager] removeItemAtURL:[savePanel URL] error:nil];
-                [self compose:outputFileURL andExport:[savePanel URL]];
-                
-			}
-            else
-            {
-				[[NSFileManager defaultManager] removeItemAtURL:outputFileURL error:nil];
-			}
-		}];
+         {
+             if (result == NSOKButton)
+             {
+                 [[NSFileManager defaultManager] removeItemAtURL:[savePanel URL] error:nil];
+                 [self compose:outputFileURL andExport:[savePanel URL]];
+                 
+             }
+             else
+             {
+                 [[NSFileManager defaultManager] removeItemAtURL:outputFileURL error:nil];
+             }
+         }];
 	}
 }
 
+#pragma mark AVCaptureVideoDataOutputSampleBufferDelegate Implementation
+
+// Not used here
+//- (void)captureOutput:(AVCaptureOutput *)captureOutput didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection
+//{
+//    
+//}
+
 #pragma mark - Video Editing & Exporting
+
+#define degreesToRadians(x) (M_PI * x / 180.0)
 
 - (void)compose:(NSURL *)sourceURL andExport:(NSURL *)outputURL
 {
-//    [self.progressIndicator setHidden:NO];
-//    [self.progressIndicator startAnimation:nil];
-    
     NSProgressIndicator *progressIndicator = [[NSProgressIndicator alloc] initWithFrame:self.progressIndicator.frame];
     [progressIndicator setIndeterminate:YES];
     [self.view addSubview:progressIndicator];
     [progressIndicator startAnimation:nil];
     
-    AVAsset *videoAsset = [AVAsset assetWithURL:sourceURL];
+    AVURLAsset *videoAsset = [AVURLAsset assetWithURL:sourceURL];
     
-    NSArray *assetKeysToLoadAndTest = [NSArray arrayWithObjects:@"playable", @"hasProtectedContent", @"tracks", @"duration", nil];
-	[videoAsset loadValuesAsynchronouslyForKeys:assetKeysToLoadAndTest completionHandler:^(void)
+    
+    NSError* error = NULL;
+    AVMutableComposition* mixComposition = [AVMutableComposition composition];
+    
+    
+    AVAssetTrack *clipVideoTrack = nil;
+    AVAssetTrack *audioTrack = nil;
+    NSArray *videoTracks = [videoAsset tracksWithMediaType:AVMediaTypeVideo];
+    NSArray *audioTracks = [videoAsset tracksWithMediaType:AVMediaTypeAudio];
+    
+    if (videoTracks.count > 0)
     {
-		// The asset invokes its completion handler on an arbitrary queue when loading is complete.
-		dispatch_async(dispatch_get_main_queue(), ^(void) {
-            AVMutableComposition* mixComposition = [AVMutableComposition composition];
-            
-            AVMutableCompositionTrack *compositionVideoTrack = [mixComposition addMutableTrackWithMediaType:AVMediaTypeVideo
-                                                                                           preferredTrackID:kCMPersistentTrackID_Invalid];
-            
-            
-            AVAssetTrack *clipVideoTrack = [[videoAsset tracks] objectAtIndex:0];
-
-            [compositionVideoTrack insertTimeRange:CMTimeRangeMake(kCMTimeZero, videoAsset.duration)
-                                           ofTrack:clipVideoTrack
-                                            atTime:kCMTimeZero error:nil];
-            
-            [compositionVideoTrack setPreferredTransform:[[[videoAsset tracksWithMediaType:AVMediaTypeVideo] objectAtIndex:0] preferredTransform]];
-            
-            
-            
-            AVAssetTrack *audioTrack = [[videoAsset tracks] objectAtIndex:1];
-            NSError* error = NULL;
-            AVMutableCompositionTrack *compositionAudioTrack = [mixComposition addMutableTrackWithMediaType:AVMediaTypeAudio preferredTrackID:kCMPersistentTrackID_Invalid];
-            [compositionAudioTrack insertTimeRange:CMTimeRangeMake(kCMTimeZero,videoAsset.duration)
-                                           ofTrack:audioTrack
-                                            atTime:kCMTimeZero
-                                             error:&error];
-            
-            CGSize videoSize = [clipVideoTrack naturalSize];
-            
-            CATextLayer *captionLayer = [[CATextLayer alloc] init];
-            [captionLayer setFont:@"Helvetica-Bold"];
-            [captionLayer setFontSize:36];
-            [captionLayer setFrame:CGRectMake(0, videoSize.height/8, videoSize.width, 100)];
-            [captionLayer setString:self.captionTextField.stringValue];
-            [captionLayer setAlignmentMode:kCAAlignmentCenter];
-            [captionLayer setForegroundColor:[[NSColor whiteColor] CGColor]];
-            
-            CALayer *parentLayer = [CALayer layer];
-            CALayer *videoLayer = [CALayer layer];
-            parentLayer.frame = CGRectMake(0, 0, videoSize.width, videoSize.height);
-            videoLayer.frame = CGRectMake(0, 0, videoSize.width, videoSize.height);
-            [parentLayer addSublayer:videoLayer];
-            [parentLayer addSublayer:captionLayer];
-            
-            AVMutableVideoComposition* videoComp = [AVMutableVideoComposition videoComposition];
-            videoComp.renderSize = videoSize;
-            videoComp.frameDuration = CMTimeMake(1, 30);
-            videoComp.animationTool = [AVVideoCompositionCoreAnimationTool videoCompositionCoreAnimationToolWithPostProcessingAsVideoLayer:videoLayer
-                                                                                                                                   inLayer:parentLayer];
-            
-            AVMutableVideoCompositionInstruction *instruction = [AVMutableVideoCompositionInstruction videoCompositionInstruction];
-            instruction.timeRange = CMTimeRangeMake(kCMTimeZero, [mixComposition duration]);
-            
-            AVAssetTrack *videoTrack = [[mixComposition tracksWithMediaType:AVMediaTypeVideo] objectAtIndex:0];
-            AVMutableVideoCompositionLayerInstruction* layerInstruction =
-            [AVMutableVideoCompositionLayerInstruction videoCompositionLayerInstructionWithAssetTrack:videoTrack];
-            
-            instruction.layerInstructions = [NSArray arrayWithObject:layerInstruction];
-            videoComp.instructions = [NSArray arrayWithObject: instruction];
-            
-            AVAssetExportSession *assetExport = [[AVAssetExportSession alloc] initWithAsset:mixComposition presetName:AVAssetExportPreset1280x720];
-            assetExport.videoComposition = videoComp;
-            assetExport.outputFileType = AVFileTypeQuickTimeMovie;
-            assetExport.outputURL = outputURL;
-            assetExport.shouldOptimizeForNetworkUse = YES;
-            
-            [assetExport exportAsynchronouslyWithCompletionHandler: ^(void )
-            {
-                NSLog(@"Export done; video exported at %@", outputURL);
-                dispatch_async(dispatch_get_main_queue(),^(void)
-                {
-                    [progressIndicator stopAnimation:nil];
-                    [progressIndicator removeFromSuperview];
-                    [[NSFileManager defaultManager] removeItemAtURL:sourceURL error:nil];
-                    [[NSWorkspace sharedWorkspace] openURL:outputURL];
-                });
-             }];
-		});
-	}];
+        clipVideoTrack = [videoTracks objectAtIndex:0];
+        
+        AVMutableCompositionTrack *compositionVideoTrack = [mixComposition addMutableTrackWithMediaType:AVMediaTypeVideo
+                                                                                       preferredTrackID:kCMPersistentTrackID_Invalid];
+        
+        [compositionVideoTrack insertTimeRange:CMTimeRangeMake(kCMTimeZero, videoAsset.duration)
+                                       ofTrack:clipVideoTrack
+                                        atTime:kCMTimeZero error:nil];
+        
+        [compositionVideoTrack setPreferredTransform:[clipVideoTrack preferredTransform]];
+    }
+    
+    
+    if (audioTracks.count > 0)
+    {
+        audioTrack = [audioTracks objectAtIndex:0];
+        
+        AVMutableCompositionTrack *compositionAudioTrack = [mixComposition addMutableTrackWithMediaType:AVMediaTypeAudio
+                                                                                       preferredTrackID:kCMPersistentTrackID_Invalid];
+        
+        [compositionAudioTrack insertTimeRange:CMTimeRangeMake(kCMTimeZero,videoAsset.duration)
+                                       ofTrack:audioTrack
+                                        atTime:kCMTimeZero
+                                         error:&error];
+    }
+    
+    CGSize videoSize = [clipVideoTrack naturalSize];
+    
+    CATextLayer *captionLayer = [[CATextLayer alloc] init];
+    [captionLayer setFont:@"Helvetica-Bold"];
+    [captionLayer setFontSize:36];
+    [captionLayer setFrame:CGRectMake(0, videoSize.height/8, videoSize.width, 100)];
+    [captionLayer setString:self.captionTextField.stringValue];
+    [captionLayer setAlignmentMode:kCAAlignmentCenter];
+    [captionLayer setForegroundColor:[[NSColor whiteColor] CGColor]];
+    
+//    CALayer *sublayer = [CALayer layer];
+//    sublayer.backgroundColor = [NSColor blueColor].CGColor;
+//    sublayer.shadowOffset = CGSizeMake(0, 3);
+//    sublayer.shadowRadius = 5.0;
+//    sublayer.shadowColor = [NSColor blackColor].CGColor;
+//    sublayer.shadowOpacity = 0.8;
+//    sublayer.frame = CGRectMake(30, 30, 128, 192);
+    
+    CALayer *parentLayer = [CALayer layer];
+    CALayer *videoLayer = [CALayer layer];
+    parentLayer.frame = CGRectMake(0, 0, videoSize.width, videoSize.height);
+    videoLayer.frame = CGRectMake(0, 0, videoSize.width, videoSize.height);
+    [parentLayer addSublayer:videoLayer];
+    [parentLayer addSublayer:captionLayer];
+//    [parentLayer addSublayer:sublayer];
+    
+    AVMutableVideoComposition *videoComp = [AVMutableVideoComposition videoComposition];
+    videoComp.renderSize = videoSize;
+    videoComp.frameDuration = CMTimeMake(1, 30);
+    videoComp.animationTool = [AVVideoCompositionCoreAnimationTool videoCompositionCoreAnimationToolWithPostProcessingAsVideoLayer:videoLayer
+                                                                                                                           inLayer:parentLayer];
+    
+    AVMutableVideoCompositionInstruction *instruction = [AVMutableVideoCompositionInstruction videoCompositionInstruction];
+    instruction.timeRange = CMTimeRangeMake(kCMTimeZero, [mixComposition duration]);
+    
+    AVMutableVideoCompositionLayerInstruction* layerInstruction =
+    [AVMutableVideoCompositionLayerInstruction videoCompositionLayerInstructionWithAssetTrack:clipVideoTrack];
+    
+    instruction.layerInstructions = [NSArray arrayWithObject:layerInstruction];
+    videoComp.instructions = [NSArray arrayWithObject: instruction];
+    
+    AVAssetExportSession *assetExport = [[AVAssetExportSession alloc] initWithAsset:mixComposition presetName:AVAssetExportPreset1280x720];
+    assetExport.videoComposition = videoComp;
+    assetExport.outputFileType = AVFileTypeQuickTimeMovie;
+    assetExport.outputURL = outputURL;
+    assetExport.shouldOptimizeForNetworkUse = YES;
+    
+    dispatch_async(dispatch_get_main_queue(), ^(void) {
+        [assetExport exportAsynchronouslyWithCompletionHandler: ^(void )
+         {
+             [progressIndicator stopAnimation:nil];
+             [progressIndicator removeFromSuperview];
+             if (assetExport.status == AVAssetExportSessionStatusCompleted)
+             {
+                 NSLog(@"Export done; video exported at %@", outputURL);
+                 dispatch_async(dispatch_get_main_queue(),^(void)
+                                {
+                                    [[NSFileManager defaultManager] removeItemAtURL:sourceURL error:nil];
+                                    [[NSWorkspace sharedWorkspace] openURL:outputURL];
+                                });
+             }
+             else
+             {
+                 NSLog(@"Error: in %s expected to received status AVAssetExportSessionStatusCompleted, read %ld instead.", __PRETTY_FUNCTION__, (long)assetExport.status);
+             }
+         }];
+    });
 }
 
 #pragma mark - AVCaptureFileOutputDelegate Implementation
@@ -510,6 +578,115 @@
     CGFloat linear = (pow(10.f, 0.05f * decibels) * 40.0f);
 //    NSLog(@"Decibels: %f - %f", decibels, linear);
 	self.audioInputLevel = linear;
+}
+
+#pragma mark Multi Files
+
+// Select & open multiple movie files to append them to each other and
+// save the output into one file
+
+- (IBAction)openFilesClicked:(id)sender
+{
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    [panel setAllowsMultipleSelection:YES];
+     
+     [panel beginWithCompletionHandler:^(NSInteger result){
+        if (result == NSFileHandlingPanelOKButton) {
+            self.selectedFiles = [panel URLs];
+            [self mergeVideosAndSave];
+        }
+        
+    }];
+}
+
+- (void)mergeVideosAndSave
+{
+    AVMutableComposition* mixComposition = [AVMutableComposition composition];
+    AVMutableCompositionTrack *compositionVideoTrack = [mixComposition addMutableTrackWithMediaType:AVMediaTypeVideo
+                                                                                   preferredTrackID:kCMPersistentTrackID_Invalid];
+    AVMutableCompositionTrack *compositionAudioTrack = [mixComposition addMutableTrackWithMediaType:AVMediaTypeAudio
+                                                                                   preferredTrackID:kCMPersistentTrackID_Invalid];
+    
+
+    for (NSURL *aURL in self.selectedFiles)
+    {
+        AVURLAsset *videoAsset = [AVURLAsset assetWithURL:aURL];
+        NSError* error = nil;
+        CMTime runningDuration = mixComposition.duration;
+        
+        
+        AVAssetTrack *clipVideoTrack = nil;
+        AVAssetTrack *audioTrack = nil;
+        NSArray *videoTracks = [videoAsset tracksWithMediaType:AVMediaTypeVideo];
+        NSArray *audioTracks = [videoAsset tracksWithMediaType:AVMediaTypeAudio];
+
+        if (videoTracks.count > 0)
+        {
+            clipVideoTrack = [videoTracks objectAtIndex:0];
+            
+            
+            [compositionVideoTrack insertTimeRange:CMTimeRangeMake(kCMTimeZero, videoAsset.duration)
+                                           ofTrack:clipVideoTrack
+                                            atTime:runningDuration
+                                             error:&error];
+            if (error)
+            {
+                NSLog(@"ERROR: %@", error);
+            }
+        }
+        
+        
+        if (audioTracks.count > 0)
+        {
+            audioTrack = [audioTracks objectAtIndex:0];
+            
+            [compositionAudioTrack insertTimeRange:CMTimeRangeMake(kCMTimeZero,videoAsset.duration)
+                                           ofTrack:audioTrack
+                                            atTime:runningDuration
+                                             error:&error];
+        }
+
+    }
+
+    NSSavePanel *savePanel = [NSSavePanel savePanel];
+    [savePanel setAllowedFileTypes:[NSArray arrayWithObject:AVFileTypeQuickTimeMovie]];
+    [savePanel setCanSelectHiddenExtension:YES];
+    
+    [savePanel beginSheetModalForWindow:self.view.window completionHandler:^(NSInteger result)
+     {
+         if (result == NSOKButton)
+         {
+             [[NSFileManager defaultManager] removeItemAtURL:[savePanel URL] error:nil];
+             NSURL *outputURL = [savePanel URL];
+             
+             AVAssetExportSession *assetExport = [[AVAssetExportSession alloc] initWithAsset:mixComposition presetName:AVAssetExportPreset1280x720];
+             assetExport.outputFileType = AVFileTypeQuickTimeMovie;
+             assetExport.outputURL = outputURL;
+             assetExport.shouldOptimizeForNetworkUse = YES;
+             
+             dispatch_async(dispatch_get_main_queue(), ^(void) {
+                 [assetExport exportAsynchronouslyWithCompletionHandler: ^(void )
+                  {
+                      if (assetExport.status == AVAssetExportSessionStatusCompleted)
+                      {
+                          NSLog(@"Export done; video exported at %@", outputURL);
+                          dispatch_async(dispatch_get_main_queue(),^(void)
+                                         {
+                                             [[NSWorkspace sharedWorkspace] openURL:outputURL];
+                                         });
+                      }
+                      else
+                      {
+                          NSLog(@"Error: in %s expected to received status AVAssetExportSessionStatusCompleted, read %ld instead.", __PRETTY_FUNCTION__, (long)assetExport.status);
+                      }
+                  }];
+             });
+         }
+         else
+         {
+         }
+     }];
+
 }
 
 @end

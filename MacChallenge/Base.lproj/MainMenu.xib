@@ -397,8 +397,20 @@
                             <constraint firstAttribute="width" constant="96" id="Nsr-6L-Bn0"/>
                         </constraints>
                     </progressIndicator>
+                    <button verticalHuggingPriority="750" translatesAutoresizingMaskIntoConstraints="NO" id="yIs-yZ-x43">
+                        <rect key="frame" x="183" y="588" width="106" height="32"/>
+                        <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMinY="YES"/>
+                        <buttonCell key="cell" type="push" title="Open Files" bezelStyle="rounded" alignment="center" borderStyle="border" imageScaling="proportionallyDown" inset="2" id="Cg4-Vi-8dC">
+                            <behavior key="behavior" pushIn="YES" lightByBackground="YES" lightByGray="YES"/>
+                            <font key="font" metaFont="system"/>
+                        </buttonCell>
+                        <connections>
+                            <action selector="openFilesClicked:" target="16x-QH-4ir" id="ikL-9B-asX"/>
+                        </connections>
+                    </button>
                 </subviews>
                 <constraints>
+                    <constraint firstItem="yIs-yZ-x43" firstAttribute="leading" secondItem="RXu-5X-B0H" secondAttribute="trailing" constant="13" id="1cG-kQ-PTR"/>
                     <constraint firstItem="HPl-8r-iPh" firstAttribute="top" secondItem="SL9-BT-fXF" secondAttribute="bottom" constant="20" id="4Sk-H3-UV3"/>
                     <constraint firstItem="SL9-BT-fXF" firstAttribute="top" secondItem="qlu-9b-gfm" secondAttribute="bottom" constant="18" id="4xU-4o-ckc"/>
                     <constraint firstItem="qlu-9b-gfm" firstAttribute="leading" secondItem="372" secondAttribute="leading" constant="20" id="Cck-lh-pel"/>
@@ -409,6 +421,7 @@
                     <constraint firstItem="RXu-5X-B0H" firstAttribute="top" secondItem="372" secondAttribute="top" constant="20" id="NP1-Cx-Nvt"/>
                     <constraint firstAttribute="trailing" secondItem="qlu-9b-gfm" secondAttribute="trailing" constant="20" id="OBV-uM-OUJ"/>
                     <constraint firstItem="MaF-Zu-gbi" firstAttribute="leading" secondItem="WbD-2n-5Xq" secondAttribute="trailing" constant="10" id="Pvc-ka-CW8"/>
+                    <constraint firstItem="yIs-yZ-x43" firstAttribute="top" secondItem="372" secondAttribute="top" constant="19" id="T5c-S7-rlb"/>
                     <constraint firstAttribute="bottom" secondItem="HPl-8r-iPh" secondAttribute="bottom" constant="20" id="XjF-dg-MWf"/>
                     <constraint firstAttribute="trailing" secondItem="SL9-BT-fXF" secondAttribute="trailing" constant="20" id="anH-LM-ghO"/>
                     <constraint firstAttribute="bottom" secondItem="WbD-2n-5Xq" secondAttribute="bottom" constant="22" id="cJD-vp-8zN"/>
